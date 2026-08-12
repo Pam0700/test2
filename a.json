@@ -1,0 +1,83 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || {};\nconst token = body.t || '';\nconst url = body.url || '';\n\n// Lấy database lưu token tạo link\nconst db = $getWorkflowStaticData('global');\nconst session = db.linkSessions ? db.linkSessions[token] : null;\n\nlet html = '';\nlet isValid = false;\n\nif (!session) {\n  html = `<h2>❌ Liên kết không hợp lệ.</h2>`;\n} else if (Date.now() > session.expires_at) {\n  html = `<h2>⏱ Đã hết hạn. Vui lòng tạo link mới trong Zalo.</h2>`;\n} else {\n  isValid = true;\n  session.used = true; // Đánh dấu đã sử dụng\n  html = `<!DOCTYPE html><html lang=\"vi\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Thành công</title><style>body{font-family:Arial,sans-serif;background:#f5f5f5;text-align:center;padding:50px 20px;} .box{max-width:400px;margin:auto;background:#fff;padding:30px;border-radius:15px;box-shadow:0 4px 15px rgba(0,0,0,0.1);}</style></head><body><div class=\"box\"><h2 style=\"color:#128C4A;\">✅ Đã nhận link!</h2><p>Hệ thống đang xử lý, vui lòng quay lại <b>Zalo</b> để nhận link Affiliate nhé.</p></div></body></html>`;\n}\n\nreturn [{\n  json: {\n    isValid,\n    html,\n    session,\n    url\n  }\n}];"
+      },
+      "id": "node-process-form-submit",
+      "name": "Process Form Submit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1232,
+        -112
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "node-respond-web-form",
+      "name": "Respond Web Form",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1460,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $input.first().json;\n\n// Nếu session không hợp lệ, ngừng xử lý\nif (!src.isValid) return [];\n\n// Giả lập Payload giống hệt Zalo gửi đến\nreturn [{\n  json: {\n    headers: {\n      // Lưu ý: Chuỗi này phải khớp với webhookSecret trong node Config + Router\n      'x-bot-api-secret-token': 'ZaloShopee2026ABC789' \n    },\n    body: {\n      message: {\n        text: src.url,\n        chat: { id: src.session.chat_id },\n        from: {\n          id: src.session.user_id,\n          display_name: src.session.display_name\n        }\n      }\n    }\n  }\n}];"
+      },
+      "id": "node-mock-zalo-message",
+      "name": "Mock Zalo Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1460,
+        -20
+      ]
+    }
+  ],
+  "connections": {
+    "Process Form Submit": {
+      "main": [
+        [
+          {
+            "node": "Respond Web Form",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Mock Zalo Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mock Zalo Message": {
+      "main": [
+        [
+          {
+            "node": "Config + Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
