@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <title>Hệ Thống Gộp File Giao Hàng</title>
+    <!-- Nhúng thư viện stlite -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.31.1/build/stlite.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.31.1/build/stlite.js"></script>
+    <script>
+      stlite.mount(
+        {
+          requirements: ["pandas", "openpyxl", "xlsxwriter"],
+          entrypoint: "app.py",
+          files: {
+            "app.py": `
+import streamlit as st
+import pandas as pd
+from io import BytesIO
+import re
+
+st.set_page_config(page_title="Hệ Thống Gộp File", layout="wide")
+st.title("🚛 Ứng dụng tự động gộp dữ liệu Giao Hàng")
+
+st.markdown("### 📥 Bước 1: Tải lên các file dữ liệu")
+col1, col2, col3 = st.columns(3)
+with col1:
+    file_products = st.file_uploader("1. Upload các file Sản phẩm", type=['xlsx', 'xls'], accept_multiple_files=True)
+with col2:
+    file_dg = st.file_uploader("2. Upload file Giao hàng (dg)", type=['xlsx', 'xls'])
+with col3:
+    file_rules = st.file_uploader("3. Upload Quy tắc (Tùy chọn)", type=['xlsx', 'xls'])
+
+def shorten_name(name):
+    name = str(name)
+    remove_terms = ['Chi Nhánh Hà Nội-Công ty Cổ Phần Dịch Vụ Thương Mại Tổng Hợp ', 'Chi Nhánh Hà Nội-Công ty Cổ Phần ', 'Chi Nhánh Hà Nội - ', 'Công ty Cổ Phần ', 'Công ty TNHH ', 'Công Ty Cổ Phần ', 'TNHH ']
+    for term in remove_terms: name = name.replace(term, '')
+    return name.strip(' -,.')
+
+def shorten_address(addr):
+    addr = str(addr)
+    for term in [', hà nội', ', ha noi', ', hn', 'hà nội', 'ha noi', 'hn']:
+         addr = re.sub(term, '', addr, flags=re.IGNORECASE)
+    addr = re.sub(r'^\\d+:\\d+,', '', addr) 
+    return addr.strip(' -,.')
+
+def get_priority(name):
+    name_lower = str(name).lower()
+    if '5kg' in name_lower: return 1
+    if '2kg' in name_lower: return 2
+    if '1kg' in name_lower: return 3
+    if 'tf' in name_lower: return 4
+    if '500g' in name_lower: return 5
+    return 6
+
+def apply_product_rules(name, rules_dict):
+    name_str = str(name).strip()
+    if name_str in rules_dict:
+        return rules_dict[name_str]
+    return re.sub(r'(?i)vietgap', '', name_str).strip()
+
+def find_product_column(df):
+    for col in df.columns:
+        if 'san pham' in str(col).lower() or 'sản phẩm' in str(col).lower():
+            return col
+    return None
+
+if file_products and file_dg:
+    try:
+        rules_dict = {}
+        if file_rules:
+            df_rules = pd.read_excel(file_rules)
+            cols = df_rules.columns
+            if len(cols) >= 2:
+                rules_dict = dict(zip(df_rules[cols[0]].astype(str).str.strip(), df_rules[cols[1]].astype(str).str.strip()))
+                st.success(f"✅ Đã tải lên quy tắc rút gọn cho {len(rules_dict)} sản phẩm.")
+
+        prod_dfs = []
+        for f in file_products:
+            xls = pd.ExcelFile(f)
+            sheet_name = 'Sheet1' if 'Sheet1' in xls.sheet_names else xls.sheet_names[0]
+            df_temp = pd.read_excel(xls, sheet_name=sheet_name)
+            
+            if 'Code' in df_temp.columns:
+                prod_col = find_product_column(df_temp)
+                if prod_col:
+                    df_clean = df_temp[['Code', prod_col]].rename(columns={prod_col: 'Tên sản phẩm'})
+                    prod_dfs.append(df_clean)
+
+        if not prod_dfs:
+            st.error("❌ Lỗi: Không tìm thấy cột 'Code' và cột 'Sản phẩm' trong file tải lên!")
+            st.stop()
+
+        df_products = pd.concat(prod_dfs).dropna(subset=['Code', 'Tên sản phẩm'])
+        df_dg = pd.read_excel(file_dg, sheet_name='dg')
+        df_merged = pd.merge(df_dg, df_products, on='Code', how='left')
+
+        st.success(f"✅ Đã kết nối dữ liệu thành công!")
+
+        st.markdown("### 🖨️ Bước 2: Chọn Chuyến Xe và Xuất File")
+        unique_ships = df_merged['Ship'].dropna().unique().tolist()
+        selected_ships = st.multiselect("Chọn chuyến xe (Ship):", options=unique_ships)
+
+        if selected_ships:
+            df_ship = df_merged[df_merged['Ship'].isin(selected_ships)].copy()
+            
+            blocks = []
+            for code, group in df_ship.groupby('Code'):
+                if group.empty: continue
+                
+                khach = shorten_name(group['Tên khách hàng'].iloc[0])
+                giao = shorten_address(group['Điểm giao hàng'].iloc[0])
+                customer_info = f"{khach}\\n(ĐC: {giao})"
+                
+                raw_prods = group['Tên sản phẩm'].dropna().unique().tolist()
+                prods = [apply_product_rules(p, rules_dict) for p in raw_prods if str(p).strip() != '']
+                prods = sorted(list(set(prods)), key=get_priority)
+                
+                if prods:
+                    blocks.append({'info': customer_info, 'products': prods})
+
+            output_rows = []
+            current_page_rows = 0
+
+            for block in blocks:
+                prods = block['products']
+                info = block['info']
+                block_size = len(prods)
+                
+                if current_page_rows + block_size > 25:
+                    while current_page_rows < 25:
+                        output_rows.append(["", ""])
+                        current_page_rows += 1
+                    current_page_rows = 0 
+                    
+                for i, p in enumerate(prods):
+                    output_rows.append([info if i == 0 else "", p])
+                    current_page_rows += 1
+
+            if current_page_rows > 0:
+                while current_page_rows < 25:
+                    output_rows.append(["", ""])
+                    current_page_rows += 1
+
+            df_final = pd.DataFrame(output_rows, columns=['Khách hàng & Điểm giao', 'Danh sách Sản phẩm'])
+            st.dataframe(df_final, use_container_width=True)
+
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df_final.to_excel(writer, index=False, sheet_name='Bao_Cao')
+                workbook = writer.book
+                worksheet = writer.sheets['Bao_Cao']
+                
+                wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top', 'border': 1})
+                header_format = workbook.add_format({'bold': True, 'bg_color': '#1F4E78', 'font_color': 'white', 'align': 'center', 'valign': 'vcenter', 'border': 1})
+
+                for col_num, value in enumerate(df_final.columns.values):
+                    worksheet.write(0, col_num, value, header_format)
+
+                worksheet.set_column('A:A', 50, wrap_format)
+                worksheet.set_column('B:B', 60, wrap_format)
+                
+            excel_data = output.getvalue()
+
+            st.download_button(
+                label="📥 Tải file Excel (Bản In 25 dòng)",
+                data=excel_data,
+                file_name="Bao_Cao_Giao_Hang_25Dong.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+    except Exception as e:
+        st.error(f"Đã xảy ra lỗi: {e}")
+            `
+          }
+        },
+        document.getElementById("root")
+      );
+    </script>
+  </body>
+</html>
